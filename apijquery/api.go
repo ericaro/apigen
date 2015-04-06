@@ -59,6 +59,8 @@ type Entry struct {
 	Title      string      `xml:"entry>title"`
 	Desc       string      `xml:"desc"`
 	Signature  []Signature `xml:"signature"`
+
+	goName string // if empty GOName() uses a rule from Name() otherwise use this one
 }
 
 //Receiver computes the expected receiver
@@ -91,6 +93,13 @@ func (e Entry) ReturnVoid() bool { return e.Return == "" || e.Return == "undefin
 func (e Entry) Name() string {
 	parts := strings.Split(e.RawName, ".")
 	return parts[len(parts)-1]
+}
+func (e *Entry) SetGoName(name string) { e.goName = name }
+func (e Entry) GoName() string {
+	if e.goName != "" {
+		return e.goName
+	}
+	return Title(e.Name()) //Default behavior
 }
 
 //Title is a function to uppercase the first letter of a name

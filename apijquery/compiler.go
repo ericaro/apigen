@@ -52,13 +52,30 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 	}
 
 	for _, e := range api.Entries {
+		//remove deprecated
+		entries := make([]*Entry, 0, len(e.Entry))
+
 		for _, p := range e.Entry {
 			if c.isOk(p) {
-				all = append(all, p)
+				entries = append(entries, p)
 			} else {
 				c.logRejected(p)
 			}
 		}
+		//entries might contains nothing, or only one
+		switch {
+		case len(entries) == 0: //nothing to do
+			continue
+		case len(entries) == 1:
+			//no possible conflict
+			all = append(all, entries[0])
+		case len(entries) == 2:
+			processSetter(entries[0], entries[1])
+			all = append(all, entries...)
+		default:
+			all = append(all, entries...) // add all the merge will do it's job
+		}
+
 	}
 
 	// Now all "OK" entries are in "all" (getting rid of deprecated, and removed ones)
@@ -115,17 +132,17 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 			case e.Receiver() != tyname:
 				//nothing to do, this is the entry for another type
 			case e.Type == "method":
-				if was, exists := methods[e.Name()]; exists {
+				if was, exists := methods[e.GoName()]; exists {
 					//check that an entry with the same name not already exists (this is possible)
 					x := merge(was, e) // inplace merge
 					// merge has the "permission" to change the entry name, before storing it
-					methods[x.Name()] = x
+					methods[x.GoName()] = x
 				} else {
-					methods[e.Name()] = e
+					methods[e.GoName()] = e
 				}
 				// in any case, entry can have "multiple" signature for the same function.
 				// in go we do not have this, so we need to fallback to the most generic interface (...interface{})
-				mergeSignatures(methods[e.Name()])
+				mergeSignatures(methods[e.GoName()])
 
 			case e.Type == "property":
 				if _, exists := properties[e.Name()]; exists {
@@ -172,7 +189,7 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 			for _, n := range names {
 				e := properties[n]
 				ty.Properties = append(ty.Properties, &apigen.Property{
-					Name: Title(e.Name()),  //string
+					Name: e.GoName(),       //string
 					JS:   e.Name(),         //string   // name in js
 					Type: goType(e.Return), //ast.Expr //expression defining a type
 				})
@@ -204,7 +221,7 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 				Description:  e.Desc,
 				ReceiverType: rtype,
 				ReceiverName: rname,
-				Name:         Title(e.Name()),               //    string
+				Name:         e.GoName(),                    //    string
 				JS:           e.Name(),                      //    string
 				ResultType:   goType(e.Return),              //Expr          // field/method/parameter type
 				Params:       compileParams(e.Signature[0]), //    *ast.FieldList
@@ -307,8 +324,9 @@ func merge(o, n *Entry) *Entry {
 	if o.Return == n.Return {
 		mreturn = o.Return
 	} else {
-		log.Printf("merging return type %v <> %v", o.Return, n.Return)
+		log.Printf("merging return type for %v (%v <> %v)", o.RawName, o.Return, n.Return)
 		mreturn = "Object" // by default
+
 	}
 
 	return &Entry{
@@ -431,5 +449,24 @@ func goType(s string) (t ast.Expr) {
 			},
 		}
 		//	panic(fmt.Errorf("unknown type %s", s))
+	}
+}
+
+func processSetter(get, set *Entry) {
+	// get and set might be in no particular order
+	//
+	// check that we are in a get set case, and that get/set are in the right order
+	if get.Return == "jQuery" {
+		if set.Return == "jQuery" {
+			return // nothing to do, this is not a get/set case
+		}
+		processSetter(set, get) // call in reverse order (because it was not)
+		return
+	}
+	if set.Return == "jQuery" {
+		// ok, get and set have different return type
+		// set has the right return type
+		set.SetGoName("Set" + Title(set.Name()))
+		log.Printf("renaming %v %v -> %v", set.RawName, set.Return, set.GoName())
 	}
 }
