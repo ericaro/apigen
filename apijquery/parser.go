@@ -3,13 +3,14 @@ package apijquery
 import (
 	"encoding/xml"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 //Parse the api.jquery.com directory for all *.xml files
+//
+// return the current api.Api instance
 func Parse(directory string) (api *Api, err error) {
 
 	p := &parser{api: NewApi()}
@@ -33,59 +34,40 @@ func (p *parser) walk(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
+		defer file.Close()
+
+		//read content then try to parse
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
 			return err
 		}
-		defer file.Close()
 
-		//Attempt parsing "both" ways
+		//the content can be either an <entry> or and <entries>
+		//
+		//Attempt parsing "both" ways and keep only if not empty
 		//log.Printf("Parsing %v", path)
-		err = p.parseEntry(content)
-		if err != nil {
-			log.Printf("Not an entry %v", path)
-			return err
-		}
-		err = p.parseEntries(content, path)
+
+		//try as an Entry
+		e := new(Entry)
+		err = xml.Unmarshal(content, e)
 		if err != nil {
 			return err
 		}
+
+		if e.RawName != "" { //this was an entry (it's not empty)
+			p.api.Entry = append(p.api.Entry, e)
+		} else { //this was not an "<entry>" (it's empty)
+			//try as an "<entries>"
+			entries := new(Entries)
+			err = xml.Unmarshal(content, entries)
+			if err != nil {
+				return err
+			}
+
+			if len(entries.Entry) != 0 { //there was entries, add them
+				p.api.Entries = append(p.api.Entries, entries)
+			}
+		}
 	}
-	return nil
-}
-
-func (p *parser) parseEntry(content []byte) (err error) {
-	//try to read an "entry"
-	e := new(Entry)
-	err = xml.Unmarshal(content, e)
-	if err != nil {
-		return
-	}
-
-	if e.RawName == "" {
-		return nil
-	}
-	//log.Printf("%v signatures %v", e.RawName, len(e.Signature))
-
-	p.api.Entry = append(p.api.Entry, e)
-	return
-}
-
-func (p *parser) parseEntries(content []byte, path string) (err error) {
-	//try to read an "entry"
-	entries := new(Entries)
-	err = xml.Unmarshal(content, entries)
-	if err != nil {
-		log.Printf("not an entries")
-		return
-	}
-
-	if len(entries.Entry) == 0 {
-		//log.Printf("empty entries")
-		return nil
-	}
-
-	//log.Printf("adding  entries %v %v", entries.Desc, len(entries.Entry))
-	p.api.Entries = append(p.api.Entries, entries)
 	return nil
 }

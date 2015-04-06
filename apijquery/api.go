@@ -34,10 +34,12 @@ type Entries struct {
 
 //Argument describe a signature part
 type Argument struct {
-	Name     string `xml:"name,attr"`
-	Type     string `xml:"type,attr"`
-	Desc     string `xml:"desc"`
-	Optional bool   `xml:"optional,attr"`
+	Name       string `xml:"name,attr"`
+	Type       string `xml:"type,attr"`
+	Desc       string `xml:"desc"`
+	Optional   bool   `xml:"optional,attr"`
+	Deprecated string `xml:"deprecated,attr"`
+	Removed    string `xml:"removed,attr"`
 }
 
 //Signature one of many possible signature for a single function

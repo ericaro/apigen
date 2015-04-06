@@ -1,3 +1,4 @@
+// jquery-gen is a tool to generate gopherjs jquery's binding from api.jquery.com
 package main
 
 import (
@@ -55,8 +56,8 @@ func main() {
 	}
 
 	if *output == "" {
-		fmt.Printf("generated %s/*.xml to %s\n", *input, *output)
-	} else {
 		fmt.Printf("generated %s/*.xml to stdout\n", *input)
+	} else {
+		fmt.Printf("generated %s/*.xml to %s\n", *input, *output)
 	}
 }

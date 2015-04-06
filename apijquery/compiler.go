@@ -11,7 +11,26 @@ import (
 	"github.com/ericaro/apigen"
 )
 
+//Compiler convert an *Api into the *apigen.Api intermediate object.
+//
+// *apigen.Api is a struct that can be generated into go source file.
+//
+//
 type Compiler struct{}
+
+//isOk return true if I have to keep the entry
+func (c Compiler) isOk(p *Entry) bool {
+	return p.Deprecated == "" && p.Removed == ""
+}
+
+//logRejected just print out info about a rejected entry
+func (c Compiler) logRejected(p *Entry) {
+	if p.Removed != "" {
+		log.Printf("Skipping %v : removed=%v deprecated=%v", p.RawName, p.Removed, p.Deprecated)
+	} else {
+		log.Printf("Skipping %v : deprecated=%v", p.RawName, p.Deprecated)
+	}
+}
 
 //Compile the current jquery api into the independent apigen one
 func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
@@ -20,26 +39,37 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 		Name:    "jquery",
 		Imports: []string{"github.com/gopherjs/gopherjs/js"},
 	}
+
 	//first collect all
 	all := make([]*Entry, 0, len(api.Entry)+2*len(api.Entries))
 
 	for _, p := range api.Entry {
-		//TODO filter out deprecated or removed
-		all = append(all, p)
-	}
-	for _, e := range api.Entries {
-
-		for _, p := range e.Entry {
-			//TODO filter out deprecated or removed
+		if c.isOk(p) {
 			all = append(all, p)
+		} else {
+			c.logRejected(p)
 		}
 	}
 
-	//collect types
+	for _, e := range api.Entries {
+		for _, p := range e.Entry {
+			if c.isOk(p) {
+				all = append(all, p)
+			} else {
+				c.logRejected(p)
+			}
+		}
+	}
+
+	// Now all "OK" entries are in "all" (getting rid of deprecated, and removed ones)
+
+	//collect all types defined in the API, into a set of declared receivers
 	typenames := make(map[string]interface{}) // map of all types found
 	for _, e := range all {
 		typenames[e.Receiver()] = nil // this identify the type
 	}
+
+	//Deal with EXCEPTIONS
 
 	// remove some types that are not supported
 	delete(typenames, "jQuery.browser")
@@ -62,41 +92,50 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 		}
 	}
 
-	//sort by name
+	// entries need to be sorted by name so the api generation has no "random" order
+
+	//sort types by name
 	names := make([]string, 0, len(typenames))
 	for name := range typenames {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	//for each type create a type
+	//for each type create a corresponding apigen type
 	for _, tyname := range names {
-		//building tyname
+		log.Printf("processing %v", tyname)
+
+		// keep methods and properties into a map (for key unicity)
+		// we'll sort the map later
 		methods := make(map[string]*Entry)
 		properties := make(map[string]*Entry)
 
 		for _, e := range all {
 			switch {
 			case e.Receiver() != tyname:
-				//nothing to do
+				//nothing to do, this is the entry for another type
 			case e.Type == "method":
 				if was, exists := methods[e.Name()]; exists {
-					methods[e.Name()] = merge(was, e) // inplace merge
+					//check that an entry with the same name not already exists (this is possible)
+					x := merge(was, e) // inplace merge
+					// merge has the "permission" to change the entry name, before storing it
+					methods[x.Name()] = x
 				} else {
 					methods[e.Name()] = e
 				}
+				// in any case, entry can have "multiple" signature for the same function.
+				// in go we do not have this, so we need to fallback to the most generic interface (...interface{})
 				mergeSignatures(methods[e.Name()])
 
 			case e.Type == "property":
-				if was, exists := properties[e.Name()]; exists {
-					properties[e.Name()] = merge(was, e) // inplace merge
-				} else {
-					properties[e.Name()] = e
+				if _, exists := properties[e.Name()]; exists {
+					panic(fmt.Errorf("duplicated property"))
 				}
+				properties[e.Name()] = e
 			}
 		}
 		// now I've got all the methods, properties for a given type
-		//compute the go type name
+		//compute their  go type name
 		var gotypename string
 		switch tyname {
 		case "":
@@ -106,12 +145,15 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 			gotypename = ""
 
 		//unsupported objects
-		case "event", "callbacks", "deferred", "Event", "Callbacks", "Deferred": //supported objects
+		case "event", "callbacks", "deferred": //supported objects
 			gotypename = Title(tyname)
 		}
 
+		// and build the correct apigen.Type.
+		// the "" is a special "type" to generate functions
+
 		var ty *apigen.Type
-		if gotypename != "" {
+		if gotypename != "" { // this is a regular type
 
 			ty = &apigen.Type{
 				Name:       gotypename,
@@ -128,7 +170,13 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 			sort.Strings(names)
 
 			for _, n := range names {
-				ty.Properties = append(ty.Properties, compileProperty(properties[n]))
+				e := properties[n]
+				ty.Properties = append(ty.Properties, &apigen.Property{
+					Name: Title(e.Name()),  //string
+					JS:   e.Name(),         //string   // name in js
+					Type: goType(e.Return), //ast.Expr //expression defining a type
+				})
+
 			}
 		}
 
@@ -139,37 +187,36 @@ func (c Compiler) Compile(api *Api) (out *apigen.Api, err error) {
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			out.Funcs = append(out.Funcs, compileMethod(gotypename, methods[n]))
+
+			// there is the special case of gotypename == "" that represent a static
+			// call to jquery
+			var rname string   //receiver variable name
+			var rtype ast.Expr // receiver type (nil for the special case )
+
+			if gotypename == "" { // static function
+				rname, rtype = "JQ", nil
+			} else {
+				rname, rtype = "x", &ast.Ident{Name: gotypename}
+			}
+			//everything else is straightforward
+			e := methods[n]
+			out.Funcs = append(out.Funcs, &apigen.Func{
+				Description:  e.Desc,
+				ReceiverType: rtype,
+				ReceiverName: rname,
+				Name:         Title(e.Name()),               //    string
+				JS:           e.Name(),                      //    string
+				ResultType:   goType(e.Return),              //Expr          // field/method/parameter type
+				Params:       compileParams(e.Signature[0]), //    *ast.FieldList
+				Convert:      converterFor(e.Return),        //    func(ast.Expr) ast.Expr //the expression that deals with types
+			})
 		}
 
 	}
 	return
 }
 
-func compileMethod(gotypename string, e *Entry) *apigen.Func {
-
-	var rname string
-	var rtype ast.Expr
-
-	if gotypename == "" { // static function
-		rname, rtype = "JQ", nil
-	} else {
-		rname, rtype = "x", &ast.Ident{Name: gotypename}
-	}
-
-	return &apigen.Func{
-		Description:  e.Desc,
-		ReceiverType: rtype,
-		ReceiverName: rname,
-		Name:         Title(e.Name()),               //    string
-		JS:           e.Name(),                      //    string
-		ResultType:   goType(e.Return),              //Expr          // field/method/parameter type
-		Params:       compileParams(e.Signature[0]), //    *ast.FieldList
-		Convert:      jconverter(e.Return),          //    func(ast.Expr) ast.Expr //the expression that deals with types
-	}
-
-}
-
+//compileParams returns the field list from a given signature
 func compileParams(s Signature) *ast.FieldList {
 	fields := make([]*ast.Field, 0, 10)
 
@@ -195,11 +242,22 @@ func compileParams(s Signature) *ast.FieldList {
 	}
 }
 
-func jconverter(name string) func(ast.Expr) ast.Expr {
+//converterFor return the correct "Convert" for the given return type.
+//
+// a converter is a function that converts an ast.Expr (which value has type *js.Object) into
+// another expression which value must have the type 'name'
+//
+// 'name' is the name found in the jquery documentation
+//
+//apigen has a bunch of ready to use converter, we just need to map them according
+// to the convention in jquery doc.
+func converterFor(name string) func(ast.Expr) ast.Expr {
 
 	switch name {
+
 	case "Boolean", "boolean":
 		return apigen.BoolConverter
+
 	case "Number":
 		return apigen.FloatConverter
 
@@ -233,14 +291,9 @@ func jconverter(name string) func(ast.Expr) ast.Expr {
 	}
 }
 
-func compileProperty(e *Entry) *apigen.Property {
-	return &apigen.Property{
-		Name: Title(e.Name()),  //string
-		JS:   e.Name(),         //string   // name in js
-		Type: goType(e.Return), //ast.Expr //expression defining a type
-	}
-}
-
+//merge two method entries.
+//
+// panic in impossible cases
 func merge(o, n *Entry) *Entry {
 	if o.Type != n.Type {
 		panic(fmt.Errorf("type mismatch for entry merge: %v vs %v", o.Type, n.Type))
@@ -248,10 +301,20 @@ func merge(o, n *Entry) *Entry {
 	if o.RawName != n.RawName {
 		panic(fmt.Errorf("raw name mismatch for entry merge: %v vs %v", o.RawName, n.RawName))
 	}
+
+	//deal with return type
+	var mreturn string
+	if o.Return == n.Return {
+		mreturn = o.Return
+	} else {
+		log.Printf("merging return type %v <> %v", o.Return, n.Return)
+		mreturn = "Object" // by default
+	}
+
 	return &Entry{
 		Type:      o.Type, // they must have the same type
 		RawName:   o.RawName,
-		Return:    mergeType(o.Return, n.Return),
+		Return:    mreturn,
 		Desc:      o.Desc + "\n// OR\n// " + n.Desc,
 		Signature: append(append(make([]Signature, 0, 10), o.Signature...), n.Signature...),
 	}
@@ -369,14 +432,4 @@ func goType(s string) (t ast.Expr) {
 		}
 		//	panic(fmt.Errorf("unknown type %s", s))
 	}
-}
-
-func mergeType(o, n string) string {
-	//first convert both type
-	if o == n {
-		return o
-	} else {
-		return "Object" // by default re
-	}
-
 }
